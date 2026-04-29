@@ -14,9 +14,26 @@ void* handle_client(void* arg) {
     //chat protocol lives in here
     printf("Thread started for FD %d\n", client_fd);
 
-    char *msg = "1|MSG|18|#all|#all|Welcome!|";
-    write(client_fd, msg, strlen(msg));
+    char *welcome = "1|MSG|18|#all|#all|Welcome!|";
+    write(client_fd, welcome, strlen(welcome));
 
+    char buffer[1024]; //stores incoming data from user chats
+    int bytes_read;
+
+    //makes the thread block until the client hits enter in the terminal
+    //essentially if read returns 0, the other person hung up and we can close the connection/thread
+    while ((bytes_read = read(client_fd, buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[bytes_read] = '\0'; //ends each set of values from stream with a null terminator so it can turn them into strings
+
+        printf("Received from FD %d: %s", client_fd, buffer);
+
+        //will put Protocol parser here later
+        write(client_fd, "Server received: ", 17);
+        write(client_fd, buffer, bytes_read); 
+
+    }
+
+    printf("Client on FD %d disconnected.\n", client_fd);
     close(client_fd);
     return NULL;
 
@@ -85,7 +102,7 @@ int main (int argc, char* argv[]) {
         free(new_sock);
     }
 
-    pthread_detatch(thread_id); //cleans up resources automatically thank god
+    pthread_detach(thread_id); //cleans up resources automatically thank god
    }
 
 
