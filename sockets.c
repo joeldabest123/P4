@@ -1,1 +1,8 @@
-//idk if this is necessary yet, I'll figure shit out tmr
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
