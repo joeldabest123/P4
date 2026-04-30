@@ -47,7 +47,7 @@ int read_until_bar(int fd, char *dest, int max_len) {
 void broadcast(const char *message, int sender_fd) {
     pthread_mutex_lock(&clients_mutex);
     for(int i = 0; i < MAX_CLIENTS; i++) {
-        if(clients[i].fd != -1 && clients[i].fd != sender_fd) {
+        if(clients[i].active && clients[i].fd != sender_fd) {
             write(clients[i].fd, message, strlen(message));
         }
 
@@ -87,19 +87,31 @@ void* handle_client(void* arg) {
     int body_len = atoi(length_str);
 
     //4. read the actual name
-    int n = read(client_fd, name_buffer, body_len);
-    if (n <= 0) {
+
+    if(body_len<1||body_len>33) {
+        char *err = "1|ERR|9|0|Bad Name|";
+        write(client_fd, err, strlen(err));
         close(client_fd);
         return NULL;
     }
 
+    int n = 0;
+    int total = 0;
+
+    while (total<body_len) {
+        n = read(client_fd, name_buffer+total, body_len-total);
+        if (n<=0) {
+            close(client_fd);
+            return NULL;
+        }
+        total+=n;
+    }
+
     //strips trailing |
-    if (n > 0 && name_buffer[n-1] == '|') {
-        name_buffer[n-1] = '\0';
+    if (total > 0 && name_buffer[total-1] == '|') {
+        name_buffer[total-1] = '\0';
     } else {
-        name_buffer[n] = '\0';
-        char dummy;
-        read(client_fd, &dummy, 1); // eat the | only if not already consumed
+        name_buffer[total] = '\0';
     }
 
     printf("User logged in: %s\n", name_buffer);
@@ -139,10 +151,13 @@ void* handle_client(void* arg) {
 
     //Sends welcome
 
-    char welcome[100];
-    sprintf(welcome, "1|MSG|%d|#all|%s|Welcome to the chat!|", 
-        (int)(strlen("#all") + strlen(name_buffer) + strlen("Welcome to the chat!") + 3), 
-        name_buffer);
+    char welcome[256];
+    int welc_body = (int) (strlen("#all")+1+strlen(name_buffer)
+        +1+strlen("Welcome to the chat!")+1);
+    
+    snprintf(welcome, sizeof(welcome), "1|MSG|%d|#all|%s|Welcome to the chat!|", 
+        welc_body, name_buffer);
+
     write(client_fd, welcome, strlen(welcome));
 
 
@@ -158,45 +173,263 @@ void* handle_client(void* arg) {
         if(read_until_bar(client_fd, length_str, sizeof(length_str)) < 0) break;
 
         int msg_len = atoi (length_str);
-        char *msg_body = malloc(msg_len + 1);
+        char *msg_body = malloc(msg_len + 2); //added another +1 for safety or missing trail bar
+        if (!msg_body) {
+            break;
+        }
 
         //reads msg_len bytes for body
         int total_received = 0;
+        int conn_lost = 0;
         while (total_received < msg_len) {
             int n = read(client_fd, msg_body + total_received, msg_len - total_received);
             if(n <= 0) {
+                conn_lost=1;
                 break;
             }
             total_received += n;
         }
 
-        msg_body[msg_len] = '\0'; //adds safety null terminator
+        msg_body[total_received] = '\0'; //adds safety null terminator
+
+        if(conn_lost){
+            free(msg_body);
+            break;
+        }
 
         if(strcmp(type, "MSG") == 0 ) {
 
-            char recipient[33] = {0};
-            char text[81] = {0};
+            char recipient[34] = {0};
+            char text[82] = {0};
             char *ptr = msg_body;
             if (*ptr == '|') ptr++;
 
-            sscanf(ptr, "%[^|]|%[^|]|", recipient, text);
+            //find up to first |
+            char *bar1=strchr(ptr, '|');
+            if(!bar1) { 
+                free(msg_body);
+                continue;
+            }
+
+            int rlen=(int)(bar1-ptr); //recipient length
+            if(rlen>32) {
+                rlen=32;
+            }
+            strncpy(recipient, ptr, rlen);
+            recipient[rlen]='\0';
+
+            //text after bar1 but before last |
+            char *txt_strt = bar1+1;
+            char *last_bar = strrchr(txt_strt,'|');
+
+            //text length
+            int tlen= last_bar ? (int)(last_bar - txt_strt) : (int)strlen(txt_strt);
+
+            if(tlen>80){
+                tlen=80;
+            }
+
+            strncpy(text, txt_strt, tlen);
+            text[tlen]='\0';
+
+            int text_len = (int)strlen(text);
+            while (text_len>0 && (text[text_len-1]=='\n' || text[text_len-1]=='\r')) {
+                text[--text_len] = '\0';
+            }
 
             char final_broadcast[2048];
+            
+            int body_size = (int)(strlen(clients[my_index].name)+1 + strlen(recipient) + 1 + strlen(text)+1);
+            
 
             snprintf(final_broadcast, sizeof(final_broadcast), "1|MSG|%d|%s|%s|%s|",
-                    (int)(strlen(clients[my_index].name) + strlen(recipient) + strlen(text) + 3), 
-                    clients[my_index].name, recipient, text);
+                    body_size, clients[my_index].name, recipient, text);
 
-            broadcast(final_broadcast, client_fd);
+            //ALL for public message, else private message
+            if (strcmp(recipient, "#all")==0) {
+                broadcast(final_broadcast, client_fd);
+            }
+            else {
+                pthread_mutex_lock(&clients_mutex);
+                int found = 0;
+                for(int i = 0; i<MAX_CLIENTS; i++) {
+                    if(clients[i].active && strcmp(clients[i].name, recipient)==0) {
+                        write(clients[i].fd, final_broadcast, strlen(final_broadcast));
+                        found=1;
+                        break;
+                    }
+                }
+                pthread_mutex_unlock(&clients_mutex);
+
+                //unknown recipient error
+                if(!found) {
+                    char errbuff[128];
+                    snprintf(errbuff,sizeof(errbuff),
+                        "1|ERR|%d|2|Unknown Recipient|",
+                        (int)strlen("2|Unknown Recipient|"));
+                    write(client_fd, errbuff, strlen(errbuff));
+                }
+            }
+
+            //broadcast(final_broadcast, client_fd);
         }
 
         else if (strcmp(type, "WHO") == 0) {
             //Loop through clients[] and send names back to this client_fd
             //RYAN
+
+            //strip trailing |
+            char query[34] = {0};
+            char *qlast = strrchr(msg_body, '|');
+            int qlen = qlast ? (int)(qlast - msg_body) : (int)strlen(msg_body);
+
+            if(qlen>32) {
+                qlen=32;
+            }
+
+            strncpy(query, msg_body, qlen);
+            query[qlen]='\0';
+
+            int qslen = (int)strlen(query);
+            while (qslen>0 && (query[qslen-1]=='\n' || query[qslen-1]=='\r')) {
+                query[--qslen] = '\0';
+            }
+
+            char response_txt[999999]; //100 users with 100 chars idk
+
+            response_txt[0]='\0';
+
+            pthread_mutex_lock(&clients_mutex);
+
+
+            //if all is query, every active user is listed
+            if(strcmp(query, "#all")==0){
+                int first=1;
+                for(int i = 0; i<MAX_CLIENTS; i++) {
+                    if(!clients[i].active) { continue; }
+                    if(!first) strcat(response_txt, "\n");
+                    first = 0;
+
+                    if(clients[i].status[0]!='\0') {
+                        //if status, listed in form of name: status
+                        strcat(response_txt, clients[i].name);
+                        strcat(response_txt, ": ");
+                        strcat(response_txt, clients[i].status);
+                    }
+                    else {
+                        //else, listed in form of just name
+                        strcat(response_txt, clients[i].name);
+                    }
+                }
+            } 
+            else {
+                //look up user
+                int found = 0;
+                for (int i = 0; i<MAX_CLIENTS; i++) {
+                    if(clients[i].active && strcmp(clients[i].name, query)==0) {
+                        found=1;
+                        if(clients[i].status[0]!='\0') {
+                            snprintf(response_txt, sizeof(response_txt),
+                                "%s: %s", clients[i].name, clients[i].status);
+                        }
+                        else{
+                            snprintf(response_txt, sizeof(response_txt), "No status");
+                        }
+                        break; //?
+                    }
+                }
+
+                if(!found) {
+                    pthread_mutex_unlock(&clients_mutex);
+                    char errbuf[128];
+                    snprintf(errbuf, sizeof(errbuf), "1|ERR|%d|2|Unknown Recipient|", (int)strlen("2|Unknown Recipient|"));
+                    write(client_fd, errbuf, strlen(errbuf));
+                    free(msg_body);
+                    continue;
+                }
+            }
+
+            pthread_mutex_unlock(&clients_mutex);
+
+            //build/send MSG response
+            pthread_mutex_lock(&clients_mutex);
+            char name_2[33];
+            strncpy(name_2, clients[my_index].name, 32);
+            name_2[32]='\0';
+            pthread_mutex_unlock(&clients_mutex);
+
+            int rbody = (int)(strlen("#all")+1+strlen(name_2)+1+strlen(response_txt)+1);
+            char *rbuf = malloc(rbody+64);
+
+            if(rbuf) {
+
+                snprintf(rbuf,rbody+64, "1|MSG|%d|#all|%s|%s|", rbody,name_2,response_txt);
+                write(client_fd,rbuf,strlen(rbuf));
+                free(rbuf);
+            }
+
         }
         else if (strcmp(type, "SET") == 0) {
             //update clients[my_index].status
             //RYAN
+
+            char newstat[66]={0};
+
+            //strip trailing |
+            char *slast = strrchr(msg_body, '|');
+            int slen=slast ? (int)(slast - msg_body):(int)strlen(msg_body);
+            
+            //if its too long
+            if(slen>64){
+                char errbuf[64];
+                snprintf(errbuf, sizeof(errbuf), "1|ERR|%d|4|Too Long|",
+                    (int)strlen("4|Too Long|"));
+                write(client_fd, errbuf, strlen(errbuf));
+                free(msg_body);
+                continue;
+            }
+
+            strncpy(newstat, msg_body, slen);
+            newstat[slen]='\0';
+
+            //update status
+
+            int nslen = (int)strlen(newstat);
+            
+            while(nslen>0 && (newstat[nslen-1]=='\n' || newstat[nslen-1]=='\r')) {
+                newstat[--nslen] = '\0';
+            }
+
+            pthread_mutex_lock(&clients_mutex);
+            strncpy(clients[my_index].status, newstat, 64);
+            clients[my_index].status[64]='\0';
+            char name_2[33];
+            strncpy(name_2, clients[my_index].name, 32);
+            name_2[32]='\0';
+            pthread_mutex_unlock(&clients_mutex);
+
+            //broadcast change
+            if (newstat[0]!='\0') {
+                char announce[256];
+                snprintf(announce, sizeof(announce), "%s is now \"%s\"",
+                    name_2, newstat);
+                int abody=(int) (strlen("#all")+1+strlen("#all")+1+strlen(announce)+1);
+                char *abuf = malloc(abody+32);
+
+                if(abuf){
+                    snprintf(abuf,abody+32, "1|MSG|%d|#all|#all|%s|", abody, announce);
+
+                    broadcast(abuf,-1);
+                    free(abuf);
+                }
+            }
+        }
+
+        else{
+            char *err = "1|ERR|12|0|Unknown Type|";
+            write(client_fd, err, strlen(err));
+            free(msg_body);
+            break;
         }
 
         free(msg_body);
@@ -236,6 +469,10 @@ int main (int argc, char* argv[]) {
     exit(EXIT_FAILURE);
    }
 
+   int opt=1;
+   setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+
    //binding socket to port or address (whichever floats your boat)
    if(bind(listen_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
     perror("Binding has failed F");
@@ -255,6 +492,7 @@ int main (int argc, char* argv[]) {
     clients[i].fd = -1;
     clients[i].active = 0;
     memset(clients[i].name, 0, sizeof(clients[i].name));
+    memset(clients[i].status, 0, sizeof(clients[i].status));
    }
    pthread_mutex_unlock(&clients_mutex);
 
