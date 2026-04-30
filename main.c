@@ -31,6 +31,10 @@ int read_until_bar(int fd, char *dest, int max_len) {
         if(n <= 0) {
             return -1; //conection was lost
         }
+
+        //skips leading newlines
+        if (c == '\n' || c == '\r') continue;
+        
         if (c == '|') {
             dest[total] = '\0';
             return total;
@@ -55,9 +59,9 @@ void* handle_client(void* arg) {
     int client_fd = *((int *)arg);
     free(arg);
 
-    char version[4];
-    char type[4];
-    char length_str[10];
+    char version[16];
+    char type[16];
+    char length_str[16];
     char name_buffer[33];
 
     //Phase 1: Le identification
@@ -88,7 +92,17 @@ void* handle_client(void* arg) {
         close(client_fd);
         return NULL;
     }
-    name_buffer[n-1] = '\0'; //removes le final trailing '|' and replaces it with a null terminator
+
+    //strips trailing |
+    if (n > 0 && name_buffer[n-1] == '|') {
+        name_buffer[n-1] = '\0';
+    } else {
+        name_buffer[n] = '\0';
+        char dummy;
+        read(client_fd, &dummy, 1); // eat the | only if not already consumed
+    }
+
+    printf("User logged in: %s\n", name_buffer);
 
     //Phase 2: Le Name Validation
 
@@ -126,11 +140,11 @@ void* handle_client(void* arg) {
     //Sends welcome
 
     char welcome[100];
-    sprintf(welcome, "1|MSG|%ld|#all|%s|Welcome!|", 13 + strlen(name_buffer), name_buffer);
+    sprintf(welcome, "1|MSG|%d|#all|%s|Welcome to the chat!|", 
+        (int)(strlen("#all") + strlen(name_buffer) + strlen("Welcome to the chat!") + 3), 
+        name_buffer);
     write(client_fd, welcome, strlen(welcome));
 
-    char buffer[1024]; //stores incoming data from user chats
-    int bytes_read;
 
     //Phase 3: Le protocol Loop
 
@@ -160,13 +174,20 @@ void* handle_client(void* arg) {
 
         if(strcmp(type, "MSG") == 0 ) {
 
+            char recipient[33] = {0};
+            char text[81] = {0};
+            char *ptr = msg_body;
+            if (*ptr == '|') ptr++;
+
+            sscanf(ptr, "%[^|]|%[^|]|", recipient, text);
+
             char final_broadcast[2048];
 
-            snprintf(final_broadcast, sizeof(final_broadcast), "1|MSG|%d|%s|#all|%s",
-                    (int)(strlen(clients[my_index].name) + 6 + strlen(msg_body)), 
-                    clients[my_index].name, msg_body);
+            snprintf(final_broadcast, sizeof(final_broadcast), "1|MSG|%d|%s|%s|%s|",
+                    (int)(strlen(clients[my_index].name) + strlen(recipient) + strlen(text) + 3), 
+                    clients[my_index].name, recipient, text);
 
-                    broadcast(final_broadcast, client_fd);
+            broadcast(final_broadcast, client_fd);
         }
 
         else if (strcmp(type, "WHO") == 0) {
@@ -182,7 +203,7 @@ void* handle_client(void* arg) {
 
     }
 
-    printf("Client on FD %d disconnected.\n", clients[my_index].name);
+    printf("Client %s disconnected.\n", clients[my_index].name);
     pthread_mutex_lock(&clients_mutex);
     clients[my_index].active = 0; //emptying the seat
     clients[my_index].fd = -1;
