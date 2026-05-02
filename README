@@ -1,4 +1,114 @@
 JEA211 - Joel Anderson
 rrl88 - Ryan Lily
 
+CURRENT TESTS:
 
+=====================CONNECTION==================
+
+-valid_name:
+Client connects with a valid name → receives welcome message
+
+-duplicate_name:
+Two clients attempt the same username → second receives ERR (Name in use)
+
+-bad_length_name:
+Name length does not match specified length → error + disconnect
+
+-missing_pipe_name:
+NAM message missing trailing | → error + disconnect
+
+-bad_version:
+Client sends version != 1 → error + disconnect
+
+-wrong_first_type:
+Client sends something other than NAM first → error + disconnect
+
+======================MESSAGING==================
+
+-public_message:
+Client sends message to #all → all other clients receive it
+
+-private_message:
+Client sends message to another user → only that user receives it
+
+-unknown_recipient:
+Message sent to non-existent user → ERR (Unknown Recipient)
+
+-long_message:
+Message close to 80 character limit → still delivered correctly
+
+-malformed_msg:
+Missing pipes or incorrect format → error + disconnect
+
+======================STATUS=====================
+
+-set_status:
+User sets a valid status → broadcast message appears
+
+-empty_status:
+User sets empty status → no broadcast occurs
+
+-long_status:
+Status > 64 characters → ERR (Too Long)
+
+-status_update_multiple:
+User changes status multiple times → each update handled correctly
+
+=======================WHO=======================
+
+-who_single_with_status:
+Query user with status → returns name: status
+
+-who_single_no_status:
+Query user without status → returns No status
+
+-who_all:
+Query #all → returns list of all active users
+
+-who_unknown:
+Query non-existent user → ERR (Unknown Recipient)
+
+-multiple_users:
+Multiple users connected → verify all appear in WHO response
+
+======================ERRORS=====================
+
+-unreadable_message:
+Incomplete or broken message → ERR (Unreadable) + disconnect
+
+-mismatched_length:
+Declared length != actual length → error + disconnect
+
+-missing_pipe:
+Message does not end in | → error + disconnect
+
+-unknown_type:
+Invalid message type → error + disconnect
+
+-pipe_misplacement:
+Incorrect field structure → error + disconnect
+
+====================CONCURRENCY==================
+
+-multiple_clients:
+5+ clients connected simultaneously → all operate correctly
+
+-simultaneous_messages:
+Multiple clients send messages at same time → no crashes, messages delivered properly
+
+-name_race_condition:
+Two clients attempt same name at same time → only one succeeds
+
+-broadcast_stress:
+Multiple users sending to #all rapidly → all messages delivered without corruption
+
+====================DISCONNECT===================
+
+-client_disconnect:
+Client exits normally → server frees slot
+
+-abrupt_disconnect:
+Client closes unexpectedly → server handles without crashing
+
+-reconnect:
+New client connects after disconnect → slot reused correctly
