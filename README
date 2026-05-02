@@ -1,114 +1,110 @@
 JEA211 - Joel Anderson
 rrl88 - Ryan Lily
 
+Notes for testing:
+-Fatal errors terminate the process client side after another command is attempted
+
 CURRENT TESTS:
 
-=====================CONNECTION==================
+=====================NAM==================
 
--valid_name:
-Client connects with a valid name → receives welcome message
+==Name command==
+Input command 1|NAM|4|Bob|
 
--duplicate_name:
-Two clients attempt the same username → second receives ERR (Name in use)
+Result: Client names self <name>, server welcomes
+them under that name.
 
--bad_length_name:
-Name length does not match specified length → error + disconnect
+==Duplicate name error==
+Open a second terminal after first command and try 
+naming the second user "Bob"
 
--missing_pipe_name:
-NAM message missing trailing | → error + disconnect
+Result: A non-fatal error: "1|ERR|11|1|Name in use|"  
 
--bad_version:
-Client sends version != 1 → error + disconnect
+==Invalid Character==
+Input command 1|NAM|5|B ob|
 
--wrong_first_type:
-Client sends something other than NAM first → error + disconnect
+Result: Spaces is an invalid character.
+        Should give a non-fatal error
+        "1|ERR|11|3|Illegal character|"
 
-======================MESSAGING==================
 
--public_message:
-Client sends message to #all → all other clients receive it
+==Start with non-NAM command==
+Input "1|MSG|20||#all|Hello, world!|" or 
+any other non-NAM command when first connecting 
+as a client.
 
--private_message:
-Client sends message to another user → only that user receives it
+Result: A fatal error of "1|ERR|15|0|Expected NAM|"
 
--unknown_recipient:
-Message sent to non-existent user → ERR (Unknown Recipient)
+=====================ERRORS==================
 
--long_message:
-Message close to 80 character limit → still delivered correctly
+==Missing Pipe==
+Input command 1|MSG|20||#all|Hello, world!
 
--malformed_msg:
-Missing pipes or incorrect format → error + disconnect
+Result: A fatal error of "1|ERR|15|0|Missing Pipe|"
 
-======================STATUS=====================
+==Bad Version==
+Input command 2|MSG|20||#all|Hello, world!
 
--set_status:
-User sets a valid status → broadcast message appears
+Result: A fatal error of "1|ERR|12|0|Bad Version|"
 
--empty_status:
-User sets empty status → no broadcast occurs
+==Unknown Recipient==
+Input command "1|MSG|32||Dinge|Private message to Alice|" when there is
+no user known as "Dingle"
 
--long_status:
-Status > 64 characters → ERR (Too Long)
+Result: A non-fatal error of "1|ERR|20|2|Unknown Recipient|"
 
--status_update_multiple:
-User changes status multiple times → each update handled correctly
+==Unknown Type==
+Input command 1|PLATE|5|what|
 
-=======================WHO=======================
+Result: "1|ERR|12|0|Unknown Type|"
 
--who_single_with_status:
-Query user with status → returns name: status
+=====================COMMANDS==================
 
--who_single_no_status:
-Query user without status → returns No status
+==Public Message==
+Input command: "1|MSG|20||#all|Hello, world!|"
 
--who_all:
-Query #all → returns list of all active users
+Result: A message of "Hello, world!" received by all other
+        connected clients. The sender should be whichever user
+        sent the message.
 
--who_unknown:
-Query non-existent user → ERR (Unknown Recipient)
+==Private Message==
+Input command: "1|MSG|32||Alice|Private message to Alice|"
 
--multiple_users:
-Multiple users connected → verify all appear in WHO response
+Result: User Alice will receive a private message. No other
+        user will receive the specified message.
 
-======================ERRORS=====================
+==Set Status==
+Input command: "1|SET|17|Smiling politely|"
 
--unreadable_message:
-Incomplete or broken message → ERR (Unreadable) + disconnect
+Result: User's status will be set. ALL users will receive a
+        message notification describing the status change.
 
--mismatched_length:
-Declared length != actual length → error + disconnect
+==WHO (Single, Status)==
+Input command: "1|WHO|6|Alice|"
 
--missing_pipe:
-Message does not end in | → error + disconnect
+Result: Granted there's a user named Alice who has a status, will
+        return a message of format "... |Alice: <status>|"
 
--unknown_type:
-Invalid message type → error + disconnect
+==WHO (Single, No Status)==
+Input command: "1|WHO|6|Alice|"
 
--pipe_misplacement:
-Incorrect field structure → error + disconnect
+Result: Granted there's a user named Alice who has no status, will
+        return a message of format "... |No status|"
 
-====================CONCURRENCY==================
+==WHO (All)==
+Input command: "1|WHO|5|#all|"
 
--multiple_clients:
-5+ clients connected simultaneously → all operate correctly
+Result: Will return the statuses of all users with newlines between
+        each user with the format "User: Status". For users without 
+        a status, just their screenname will be returned.
 
--simultaneous_messages:
-Multiple clients send messages at same time → no crashes, messages delivered properly
+=====================MISC==================
 
--name_race_condition:
-Two clients attempt same name at same time → only one succeeds
+==Disconnect Client==
 
--broadcast_stress:
-Multiple users sending to #all rapidly → all messages delivered without corruption
+Disconnect one or more clients.
 
-====================DISCONNECT===================
-
--client_disconnect:
-Client exits normally → server frees slot
-
--abrupt_disconnect:
-Client closes unexpectedly → server handles without crashing
-
--reconnect:
-New client connects after disconnect → slot reused correctly
+Result: This should not affect other clients or
+        the server besides a notification
+        that the client has disconnected on
+        the server side.

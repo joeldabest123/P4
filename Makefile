@@ -1,2 +1,2 @@
 P4: main.c
-  gcc -Wall -g -o P4 main.c -lpthread
+  gcc -Wall -g -o chatd main.c -lpthread

@@ -7,6 +7,8 @@
 #include <string.h>
 #include <pthread.h>
 
+#include <signal.h>
+
 #define MAX_CLIENTS 100
 
 typedef struct {
@@ -83,6 +85,8 @@ void* handle_client(void* arg) {
     char length_str[16];
     char name_buffer[33];
 
+    read_nam:;
+
     //Phase 1: Le identification
 
     //1. Read Version (Should read 1)
@@ -112,7 +116,7 @@ void* handle_client(void* arg) {
     }
 
     if(strcmp(type, "NAM") != 0) { //this part reads NAM
-        char *err = "1|ERR|12|0|Expected NAM|";
+        char *err = "1|ERR|15|0|Expected NAM|";
         write(client_fd, err, strlen(err));
         write(client_fd, "\n", 1);
         close(client_fd);
@@ -182,6 +186,23 @@ void* handle_client(void* arg) {
 
     name_buffer[body_len-1] = '\0';
 
+    //Validate chars
+    int illegal=0;
+    for (int i=0; name_buffer[i]!='\0'; i++) {
+        char ch=name_buffer[i];
+        if (!((ch>='A' && ch<='Z')||(ch>='a'&&ch<='z')|| (ch>='0' && ch<='9') || ch=='-' || ch == '_')) {
+            illegal = 1;
+            break;
+        }
+    }
+    if (illegal) {
+        char *err = "1|ERR|11|3|Illegal character|";
+        write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
+        goto read_nam; 
+    }
+
+
     printf("User logged in: %s\n", name_buffer);
 
     //Phase 2: Le Name Validation
@@ -207,8 +228,7 @@ void* handle_client(void* arg) {
         char *err = "1|ERR|11|1|Name in use|";
         write(client_fd, err, strlen(err));
         write(client_fd, "\n", 1);
-        close(client_fd);
-        return NULL;
+        goto read_nam;
     }
 
     //If succeeds and name is not taken, occupies seat
@@ -294,6 +314,8 @@ void* handle_client(void* arg) {
             }
             total_received++;
         }
+
+        msg_body[total_received] = '\0';
 
         if (conn_lost) {
             char *err = "1|ERR|12|0|Unreadable|";
@@ -647,6 +669,8 @@ int main (int argc, char* argv[]) {
     perror("Socket creation has failed F");
     exit(EXIT_FAILURE);
    }
+
+   signal(SIGPIPE, SIG_IGN);
 
    int opt=1;
    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
