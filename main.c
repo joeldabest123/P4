@@ -26,8 +26,14 @@ pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 int read_until_bar(int fd, char *dest, int max_len) {
     int total = 0;
     char c;
+
     while(total < max_len -1) {
         int n = read(fd, &c, 1); //reads stream character by character into c to find the '|'
+    
+        if (n == 0) {
+            return -2; // file reached end before '|'
+        }
+    
         if(n <= 0) {
             return -1; //conection was lost
         }
@@ -41,18 +47,31 @@ int read_until_bar(int fd, char *dest, int max_len) {
         }
         dest[total++] = c;
     }
+
     return -1; //There was a buffer overflow
 }
 
 void broadcast(const char *message, int sender_fd) {
+    int fds[MAX_CLIENTS];
+    int cnt = 0;
+    
     pthread_mutex_lock(&clients_mutex);
     for(int i = 0; i < MAX_CLIENTS; i++) {
         if(clients[i].active && clients[i].fd != sender_fd) {
-            write(clients[i].fd, message, strlen(message));
+            fds[cnt++]=clients[i].fd;
         }
-
     }
     pthread_mutex_unlock(&clients_mutex);
+
+    for(int i=0;i<cnt;i++) {
+        ssize_t w1 = write(fds[i], message, strlen(message));
+        ssize_t w2 = write(fds[i], "\n", 1);
+
+        if (w1<=0 || w2<=0) {
+            close(fds[i]);
+        }
+    }
+
 }
 
 void* handle_client(void* arg) {
@@ -68,18 +87,43 @@ void* handle_client(void* arg) {
 
     //1. Read Version (Should read 1)
     if (read_until_bar(client_fd, version, sizeof(version)) < 0) {
-        close(client_fd); 
+        char *err = "1|ERR|12|0|Unreadable|"; // SHOULD
+        write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
+        close(client_fd);
+        return NULL;
+    }
+
+    if(strcmp(version, "1") != 0) { //check version
+        char *err = "1|ERR|12|0|Bad Version|";
+        write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
+        close(client_fd);
         return NULL;
     }
 
     //2. Read type (Should read NAM) bc user is trying to log in
     if(read_until_bar(client_fd, type, sizeof(type)) < 0) {
+        char *err = "1|ERR|12|0|Unreadable|";
+        write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
+        close(client_fd);
+        return NULL;
+    }
+
+    if(strcmp(type, "NAM") != 0) { //this part reads NAM
+        char *err = "1|ERR|12|0|Expected NAM|";
+        write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
         close(client_fd);
         return NULL;
     }
 
     //3. reads the length of the following string / remaining bytes in message
     if(read_until_bar(client_fd, length_str, sizeof(length_str)) < 0) {
+        char *err = "1|ERR|12|0|Unreadable|";
+        write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
         close(client_fd);
         return NULL;
     }
@@ -91,6 +135,7 @@ void* handle_client(void* arg) {
     if(body_len<1||body_len>33) {
         char *err = "1|ERR|9|0|Bad Name|";
         write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
         close(client_fd);
         return NULL;
     }
@@ -100,19 +145,42 @@ void* handle_client(void* arg) {
 
     while (total<body_len) {
         n = read(client_fd, name_buffer+total, body_len-total);
-        if (n<=0) {
+        
+        if(n==0) {
+            char *err = "1|ERR|13|0|Bad Length|";
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
+            close(client_fd);
+            return NULL;
+
+        }
+        
+        if (n<0) {
             close(client_fd);
             return NULL;
         }
         total+=n;
     }
 
-    //strips trailing |
-    if (total > 0 && name_buffer[total-1] == '|') {
-        name_buffer[total-1] = '\0';
-    } else {
-        name_buffer[total] = '\0';
+    if (total != body_len) {
+        char *err = "1|ERR|13|0|Bad Length|";
+        write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
+        close(client_fd);
+        return NULL;
     }
+
+    
+    //strips trailing |
+    if (name_buffer[body_len-1] != '|') {
+        char *err = "1|ERR|15|0|Missing Pipe|";
+        write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
+        close(client_fd);
+        return NULL;
+    }
+
+    name_buffer[body_len-1] = '\0';
 
     printf("User logged in: %s\n", name_buffer);
 
@@ -138,6 +206,7 @@ void* handle_client(void* arg) {
         pthread_mutex_unlock(&clients_mutex); //unlocks mutex so other threads can run
         char *err = "1|ERR|11|1|Name in use|";
         write(client_fd, err, strlen(err));
+        write(client_fd, "\n", 1);
         close(client_fd);
         return NULL;
     }
@@ -159,7 +228,7 @@ void* handle_client(void* arg) {
         welc_body, name_buffer);
 
     write(client_fd, welcome, strlen(welcome));
-
+    write(client_fd, "\n", 1);
 
     //Phase 3: Le protocol Loop
 
@@ -168,10 +237,46 @@ void* handle_client(void* arg) {
     while (1) {
 
         //reads the header piece
-        if(read_until_bar(client_fd, version, sizeof(version)) < 0) break;
-        if(read_until_bar(client_fd, type, sizeof(type)) < 0) break;
-        if(read_until_bar(client_fd, length_str, sizeof(length_str)) < 0) break;
+        if(read_until_bar(client_fd, version, sizeof(version)) < 0) {
+            
+            char *err = "1|ERR|12|0|Unreadable|"; // SHOULD
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
+            close(client_fd);
 
+            break;
+        }
+
+        if(strcmp(version, "1") != 0) { //check version
+            char *err = "1|ERR|12|0|Bad Version|";
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
+            close(client_fd);
+            
+            break;
+        }
+
+        if(read_until_bar(client_fd, type, sizeof(type)) < 0) {
+            
+            char *err = "1|ERR|12|0|Unreadable|";
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
+            close(client_fd);
+
+            break;
+        }
+
+        if(read_until_bar(client_fd, length_str, sizeof(length_str)) < 0) {
+            
+            char *err = "1|ERR|12|0|Unreadable|";
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
+            close(client_fd);
+            return NULL;
+    
+            break;
+        }
+        
         int msg_len = atoi (length_str);
         char *msg_body = malloc(msg_len + 2); //added another +1 for safety or missing trail bar
         if (!msg_body) {
@@ -181,61 +286,123 @@ void* handle_client(void* arg) {
         //reads msg_len bytes for body
         int total_received = 0;
         int conn_lost = 0;
-        while (total_received < msg_len) {
-            int n = read(client_fd, msg_body + total_received, msg_len - total_received);
-            if(n <= 0) {
+        for (int i=0; i<msg_len; i++) {
+            int n = read(client_fd, msg_body+i, 1);
+            if (n <= 0) {
                 conn_lost=1;
                 break;
             }
-            total_received += n;
+            total_received++;
         }
 
-        msg_body[total_received] = '\0'; //adds safety null terminator
+        if (conn_lost) {
+            char *err = "1|ERR|12|0|Unreadable|";
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
+            free(msg_body);
+            break;
+        }
+
+        if (total_received != msg_len) {
+            char *err = "1|ERR|20|0|Mismatched Length|";
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
+            free(msg_body);
+            close(client_fd);
+            break;
+        }
+
+        if (msg_body[msg_len - 1] != '|') {
+            char *err = "1|ERR|15|0|Missing Pipe|";
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
+            free(msg_body);
+            close(client_fd);
+            break;
+        }
+
 
         if(conn_lost){
+            char *err = "1|ERR|12|0|Unreadable|";
+            write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
             free(msg_body);
             break;
         }
 
         if(strcmp(type, "MSG") == 0 ) {
 
+            //?????? ??
+            if (strchr(msg_body, '|') == NULL) {
+                char *err = "1|ERR|15|0|Missing Pipe|";
+                write(client_fd, err, strlen(err));
+                write(client_fd, "\n", 1);
+
+                free(msg_body);
+                close(client_fd);
+                break;
+            }
+
+            char sender[34] = {0};
             char recipient[34] = {0};
             char text[82] = {0};
-            char *ptr = msg_body;
-            if (*ptr == '|') ptr++;
 
-            //find up to first |
-            char *bar1=strchr(ptr, '|');
-            if(!bar1) { 
-                free(msg_body);
-                continue;
+            char *p = msg_body;
+
+            //sender
+            char *b1 = strchr(p, '|');
+            if (!b1) {
+                char *err = "1|ERR|20|0|Pipe Misplacement|";
+                write(client_fd, err, strlen(err));
+                write(client_fd, "\n", 1);
+                
+                free(msg_body); 
+                close(client_fd);
+                break; 
+            
             }
 
-            int rlen=(int)(bar1-ptr); //recipient length
-            if(rlen>32) {
-                rlen=32;
-            }
-            strncpy(recipient, ptr, rlen);
-            recipient[rlen]='\0';
-
-            //text after bar1 but before last |
-            char *txt_strt = bar1+1;
-            char *last_bar = strrchr(txt_strt,'|');
-
-            //text length
-            int tlen= last_bar ? (int)(last_bar - txt_strt) : (int)strlen(txt_strt);
-
-            if(tlen>80){
-                tlen=80;
+            int len1 = b1-p;
+            if (len1 > 32) {
+                len1 = 32;
             }
 
-            strncpy(text, txt_strt, tlen);
-            text[tlen]='\0';
+            strncpy(sender, p, len1);
+            sender[len1] = '\0';
 
-            int text_len = (int)strlen(text);
-            while (text_len>0 && (text[text_len-1]=='\n' || text[text_len-1]=='\r')) {
-                text[--text_len] = '\0';
+            //recipient
+            p = b1+1;
+            char *b2 = strchr(p, '|');
+            if (!b2) { 
+                char *err = "1|ERR|20|0|Pipe Misplacement|";
+                write(client_fd, err, strlen(err));
+                write(client_fd, "\n", 1);
+                
+                free(msg_body); 
+                close(client_fd);
+                break; 
             }
+
+            int len2 = b2 - p;
+            if (len2 > 32) {
+                len2 = 32;
+            }
+            strncpy(recipient, p, len2);
+            recipient[len2] = '\0';
+
+            //text
+            p = b2 + 1;
+            char *b3 = strrchr(p, '|');
+
+            int len3 = b3 ? (b3-p):strlen(p);
+            if (len3 > 80) {
+                len3 = 80;
+            }
+
+            strncpy(text, p, len3);
+            text[len3] = '\0';
+
+
 
             char final_broadcast[2048];
             
@@ -247,7 +414,16 @@ void* handle_client(void* arg) {
 
             //ALL for public message, else private message
             if (strcmp(recipient, "#all")==0) {
+                    //char errbuff[128];
+
+                    //snprintf(errbuff,sizeof(errbuff),
+                    //    "1|ERR|%d|2|Stupid dumbass|",
+                    //    (int)strlen("2|Stupid dumbass|"));
+                    //write(client_fd, errbuff, strlen(errbuff));
+                    //write(client_fd, "\n", 1);
+
                 broadcast(final_broadcast, client_fd);
+                
             }
             else {
                 pthread_mutex_lock(&clients_mutex);
@@ -255,6 +431,7 @@ void* handle_client(void* arg) {
                 for(int i = 0; i<MAX_CLIENTS; i++) {
                     if(clients[i].active && strcmp(clients[i].name, recipient)==0) {
                         write(clients[i].fd, final_broadcast, strlen(final_broadcast));
+                        write(clients[i].fd, "\n", 1);
                         found=1;
                         break;
                     }
@@ -268,12 +445,12 @@ void* handle_client(void* arg) {
                         "1|ERR|%d|2|Unknown Recipient|",
                         (int)strlen("2|Unknown Recipient|"));
                     write(client_fd, errbuff, strlen(errbuff));
+                    write(client_fd, "\n", 1);
                 }
             }
 
             //broadcast(final_broadcast, client_fd);
         }
-
         else if (strcmp(type, "WHO") == 0) {
             //Loop through clients[] and send names back to this client_fd
             //RYAN
@@ -365,6 +542,7 @@ void* handle_client(void* arg) {
 
                 snprintf(rbuf,rbody+64, "1|MSG|%d|#all|%s|%s|", rbody,name_2,response_txt);
                 write(client_fd,rbuf,strlen(rbuf));
+                write(client_fd, "\n", 1);
                 free(rbuf);
             }
 
@@ -428,6 +606,7 @@ void* handle_client(void* arg) {
         else{
             char *err = "1|ERR|12|0|Unknown Type|";
             write(client_fd, err, strlen(err));
+            write(client_fd, "\n", 1);
             free(msg_body);
             break;
         }

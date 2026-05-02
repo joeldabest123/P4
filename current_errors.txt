@@ -1,0 +1,11 @@
+-After an error message, server disconnects client, but clientside doesn't close until the next command. Maybe this is okay?
+
+-When sending a message to #all, it doesn't echo to the user sending it, just everybody else. Also maybe okay..?
+
+
+BROKE LITERALLY JUST NOW:
+-After setting status, instead of "|Bob is now "Smiling politely"|" the end of the message is "|Bob is now "Smiling politely|d!"|" -- This just started happening idek.
+
+-Just now, the WHO command stopped working, the name given in the response is wrong but the status is correct.
+
+-WHO for all seems weird, it doesn't say "No Status" under the no status user
